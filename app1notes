@@ -1,0 +1,645 @@
+from tkinter import *
+import tkinter as tk
+from tkinter import messagebox, filedialog
+import mysql.connector
+import json
+import os
+import logging
+from datetime import datetime
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+class NoteManager:
+    def __init__(self):
+        self.conn = None
+        self.json_file = "notes.json"
+        self.notes_cache = []
+        self.is_connected = False
+        
+    def connect_database(self):
+        """Connect to MySQL database"""
+        try:
+            self.conn = mysql.connector.connect(
+                host="localhost", 
+                port=3306, 
+                user="root", 
+                passwd="",
+                autocommit=True
+            )
+            self.is_connected = True
+            logging.info("Database connected successfully")
+            return True
+        except mysql.connector.Error as e:
+            logging.error(f"Database connection failed: {e}")
+            self.is_connected = False
+            return False
+    
+    def initialize_database(self):
+        """Create database and table if they don't exist"""
+        if not self.is_connected:
+            return False
+        
+        try:
+            cursor = self.conn.cursor()
+            
+            # Create database
+            cursor.execute("CREATE DATABASE IF NOT EXISTS db_notes")
+            cursor.execute("USE db_notes")
+            
+            # Create table
+            create_table_query = """
+                CREATE TABLE IF NOT EXISTS tb_notes (
+                    note_id INT AUTO_INCREMENT PRIMARY KEY,
+                    title VARCHAR(255) NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+            """
+            cursor.execute(create_table_query)
+            cursor.close()
+            logging.info("Database initialized successfully")
+            return True
+        except mysql.connector.Error as e:
+            logging.error(f"Database initialization failed: {e}")
+            return False
+    
+    def load_notes(self):
+        """Load notes from database or JSON file"""
+        if self.is_connected:
+            return self._load_from_database()
+        else:
+            return self._load_from_json()
+    
+    def _load_from_database(self):
+        """Load notes from MySQL database"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("USE db_notes")
+            cursor.execute("SELECT note_id, title, content FROM tb_notes ORDER BY updated_at DESC")
+            rows = cursor.fetchall()
+            cursor.close()
+            
+            notes = []
+            for row in rows:
+                notes.append({
+                    'id': row[0],
+                    'title': row[1],
+                    'content': row[2]
+                })
+            
+            self.notes_cache = notes
+            self._save_to_json(notes)  # Backup to JSON
+            logging.info(f"Loaded {len(notes)} notes from database")
+            return notes
+        except mysql.connector.Error as e:
+            logging.error(f"Failed to load from database: {e}")
+            return self._load_from_json()
+    
+    def _load_from_json(self):
+        """Load notes from JSON file"""
+        try:
+            if not os.path.exists(self.json_file):
+                return []
+            
+            with open(self.json_file, "r", encoding="utf-8") as f:
+                notes = json.load(f)
+            
+            # Validate JSON structure
+            validated_notes = []
+            for note in notes:
+                if isinstance(note, dict) and all(key in note for key in ['id', 'title', 'content']):
+                    validated_notes.append(note)
+            
+            self.notes_cache = validated_notes
+            logging.info(f"Loaded {len(validated_notes)} notes from JSON")
+            return validated_notes
+        except (json.JSONDecodeError, IOError) as e:
+            logging.error(f"Failed to load from JSON: {e}")
+            return []
+    
+    def _save_to_json(self, notes):
+        """Save notes to JSON file"""
+        try:
+            with open(self.json_file, "w", encoding="utf-8") as f:
+                json.dump(notes, f, indent=4, ensure_ascii=False)
+            logging.info("Notes saved to JSON successfully")
+        except IOError as e:
+            logging.error(f"Failed to save to JSON: {e}")
+    
+    def save_note(self, title, content):
+        """Save a new note"""
+        if not title.strip():
+            raise ValueError("Title khÃ´ng Ä‘Æ°á»£c Ä‘á»ƒ trá»‘ng")
+        if not content.strip():
+            raise ValueError("Ná»™i dung khÃ´ng Ä‘Æ°á»£c Ä‘á»ƒ trá»‘ng")
+        
+        # Check for duplicate titles
+        for note in self.notes_cache:
+            if note['title'].lower() == title.lower():
+                raise ValueError("TiÃªu Ä‘á» Ä‘Ã£ tá»“n táº¡i")
+        
+        if self.is_connected:
+            note_id = self._save_to_database(title, content)
+        else:
+            note_id = self._save_to_json_only(title, content)
+
+        # Save to JSON after insert, ensuring sync
+        self._save_to_json(self.notes_cache)
+        return note_id
+    
+    def _save_to_database(self, title, content):
+        """Save note to database"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("USE db_notes")
+            query = "INSERT INTO tb_notes (title, content) VALUES (%s, %s)"
+            cursor.execute(query, (title, content))
+            note_id = cursor.lastrowid
+            cursor.close()
+            
+            # Update cache
+            new_note = {'id': note_id, 'title': title, 'content': content}
+            self.notes_cache.insert(0, new_note)  # Insert at beginning (most recent)
+            logging.info(f"Note saved to database with ID: {note_id}")
+            return note_id
+        except mysql.connector.Error as e:
+            logging.error(f"Failed to save to database: {e}")
+            raise Exception("Lá»—i lÆ°u vÃ o database")
+    
+    def _save_to_json_only(self, title, content):
+        """Save note to JSON only (when database is unavailable)"""
+        # Generate new ID
+        max_id = max([note['id'] for note in self.notes_cache] + [0])
+        new_id = max_id + 1
+        
+        new_note = {'id': new_id, 'title': title, 'content': content}
+        self.notes_cache.insert(0, new_note)
+        logging.info(f"Note saved to JSON with ID: {new_id}")
+        return new_id
+    
+    def update_note(self, note_id, title, content):
+        """Update an existing note"""
+        if not title.strip():
+            raise ValueError("Title khÃ´ng Ä‘Æ°á»£c Ä‘á»ƒ trá»‘ng")
+        if not content.strip():
+            raise ValueError("Ná»™i dung khÃ´ng Ä‘Æ°á»£c Ä‘á»ƒ trá»‘ng")
+        
+        if self.is_connected:
+            self._update_in_database(note_id, title, content)
+        
+        # Update cache
+        updated = False
+        for note in self.notes_cache:
+            if note['id'] == note_id:
+                note['title'] = title
+                note['content'] = content
+                updated = True
+                break
+        
+        if updated:
+            self._save_to_json(self.notes_cache)
+            logging.info(f"Note {note_id} updated successfully")
+        else:
+            logging.warning(f"Note {note_id} not found to update")
+    
+    def _update_in_database(self, note_id, title, content):
+        """Update note in database"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("USE db_notes")
+            query = "UPDATE tb_notes SET title = %s, content = %s WHERE note_id = %s"
+            cursor.execute(query, (title, content, note_id))
+            cursor.close()
+        except mysql.connector.Error as e:
+            logging.error(f"Failed to update in database: {e}")
+            raise Exception("Lá»—i cáº­p nháº­t database")
+    
+    def delete_note(self, note_id):
+        """Delete a note"""
+        if self.is_connected:
+            self._delete_from_database(note_id)
+        
+        # Update cache
+        old_len = len(self.notes_cache)
+        self.notes_cache = [note for note in self.notes_cache if note['id'] != note_id]
+        if len(self.notes_cache) < old_len:
+            self._save_to_json(self.notes_cache)
+            logging.info(f"Note {note_id} deleted successfully")
+        else:
+            logging.warning(f"Note {note_id} not found to delete")
+    
+    def _delete_from_database(self, note_id):
+        """Delete note from database"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("USE db_notes")
+            query = "DELETE FROM tb_notes WHERE note_id = %s"
+            cursor.execute(query, (note_id,))
+            cursor.close()
+        except mysql.connector.Error as e:
+            logging.error(f"Failed to delete from database: {e}")
+            raise Exception("Lá»—i xÃ³a khá»i database")
+    
+    def get_note_by_id(self, note_id):
+        """Get a specific note by ID"""
+        for note in self.notes_cache:
+            if note['id'] == note_id:
+                return note
+        return None
+    
+    def export_to_file(self, file_path):
+        """Export notes to a JSON file"""
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(self.notes_cache, f, indent=4, ensure_ascii=False)
+            logging.info(f"Notes exported to: {file_path}")
+            return True
+        except IOError as e:
+            logging.error(f"Failed to export: {e}")
+            return False
+
+class NoteApp:
+    def __init__(self):
+        self.note_manager = NoteManager()
+        self.selected_note_id = None
+        self.setup_gui()
+        self.initialize_app()
+    
+    def setup_gui(self):
+        """Setup the GUI"""
+        self.window = tk.Tk()
+        self.window.title("Note Taking App - Enhanced Version")
+        self.window.geometry("900x700")
+        
+        # Menu bar
+        self.create_menu()
+        
+        # Main frames
+        self.create_frames()
+        
+        # Left panel - Notes list
+        self.create_notes_list()
+        
+        # Right panel - Note editor
+        self.create_note_editor()
+        
+        # Buttons
+        self.create_buttons()
+        
+        # Status bar
+        self.create_status_bar()
+    
+    def create_menu(self):
+        """Create menu bar"""
+        menubar = Menu(self.window)
+        
+        # File menu
+        file_menu = Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Xuáº¥t JSON", command=self.export_json)
+        file_menu.add_separator()
+        file_menu.add_command(label="ThoÃ¡t", command=self.window.quit)
+        menubar.add_cascade(label="File", menu=file_menu)
+        
+        # Help menu
+        help_menu = Menu(menubar, tearoff=0)
+        help_menu.add_command(label="Vá» chÆ°Æ¡ng trÃ¬nh", command=self.show_about)
+        menubar.add_cascade(label="Trá»£ giÃºp", menu=help_menu)
+        
+        self.window.config(menu=menubar)
+    
+    def create_frames(self):
+        """Create main frames"""
+        main_frame = tk.Frame(self.window)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        self.left_frame = tk.Frame(main_frame, width=300)
+        self.left_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        self.left_frame.pack_propagate(False)
+        
+        self.right_frame = tk.Frame(main_frame)
+        self.right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+    
+    def create_notes_list(self):
+        """Create notes list"""
+        list_title = tk.Label(self.left_frame, text="Danh sÃ¡ch ghi chÃº", font=("Arial", 12, "bold"))
+        list_title.pack(pady=(0, 10))
+        
+        list_frame = tk.Frame(self.left_frame)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+        
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.notes_listbox = tk.Listbox(
+            list_frame,
+            yscrollcommand=scrollbar.set,
+            font=("Arial", 10),
+            cursor="hand2",
+            background="#f8f9fa",
+            selectbackground="#007bff",
+            selectforeground="white"
+        )
+        self.notes_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.notes_listbox.bind('<<ListboxSelect>>', self.on_note_select)
+        
+        scrollbar.config(command=self.notes_listbox.yview)
+    
+    def create_note_editor(self):
+        """Create note editor"""
+        title_label = tk.Label(self.right_frame, text="TiÃªu Ä‘á»:", font=("Arial", 10, "bold"))
+        title_label.pack(anchor=tk.W, pady=(0, 5))
+        
+        self.title_entry = tk.Entry(
+            self.right_frame,
+            font=("Arial", 12),
+            bg="#ffffff",
+            relief=tk.SOLID,
+            bd=1
+        )
+        self.title_entry.pack(fill=tk.X, pady=(0, 10))
+        
+        content_label = tk.Label(self.right_frame, text="Ná»™i dung:", font=("Arial", 10, "bold"))
+        content_label.pack(anchor=tk.W, pady=(0, 5))
+        
+        text_frame = tk.Frame(self.right_frame)
+        text_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        text_scrollbar = tk.Scrollbar(text_frame)
+        text_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.content_text = tk.Text(
+            text_frame,
+            yscrollcommand=text_scrollbar.set,
+            font=("Arial", 11),
+            bg="#ffffff",
+            relief=tk.SOLID,
+            bd=1,
+            wrap=tk.WORD
+        )
+        self.content_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        text_scrollbar.config(command=self.content_text.yview)
+    
+    def create_buttons(self):
+        """Create action buttons"""
+        button_frame = tk.Frame(self.right_frame)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        btn_config = {
+            'font': ('Arial', 10, 'bold'),
+            'pady': 8,
+            'padx': 15,
+            'relief': tk.RAISED,
+            'bd': 2
+        }
+        
+        self.btn_save = tk.Button(
+            button_frame,
+            text="ðŸ’¾ LÆ°u má»›i",
+            command=self.save_note,
+            bg="#28a745",
+            fg="white",
+            **btn_config
+        )
+        self.btn_save.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.btn_update = tk.Button(
+            button_frame,
+            text="âœï¸ Cáº­p nháº­t",
+            command=self.update_note,
+            bg="#ffc107",
+            fg="black",
+            state=tk.DISABLED,
+            **btn_config
+        )
+        self.btn_update.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.btn_delete = tk.Button(
+            button_frame,
+            text="ðŸ—‘ï¸ XÃ³a",
+            command=self.delete_note,
+            bg="#dc3545",
+            fg="white",
+            state=tk.DISABLED,
+            **btn_config
+        )
+        self.btn_delete.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.btn_clear = tk.Button(
+            button_frame,
+            text="ðŸ—’ï¸ LÃ m má»›i",
+            command=self.clear_fields,
+            bg="#6c757d",
+            fg="white",
+            **btn_config
+        )
+        self.btn_clear.pack(side=tk.RIGHT)
+    
+    def create_status_bar(self):
+        """Create status bar"""
+        self.status_bar = tk.Label(
+            self.window,
+            text="Sáºµn sÃ ng",
+            relief=tk.SUNKEN,
+            anchor=tk.W,
+            font=("Arial", 9)
+        )
+        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+    
+    def initialize_app(self):
+        """Initialize the application"""
+        if self.note_manager.connect_database():
+            self.note_manager.initialize_database()
+            self.update_status("Káº¿t ná»‘i database thÃ nh cÃ´ng")
+        else:
+            self.update_status("KhÃ´ng thá»ƒ káº¿t ná»‘i database, sá»­ dá»¥ng JSON")
+        
+        self.refresh_notes_list()
+    
+    def refresh_notes_list(self):
+        """Refresh the notes list"""
+        self.notes_listbox.delete(0, tk.END)
+        notes = self.note_manager.load_notes()
+        
+        for note in notes:
+            display_title = note['title'][:50]
+            if len(note['title']) > 50:
+                display_title += "..."
+            self.notes_listbox.insert(tk.END, display_title)
+        
+        self.update_status(f"ÄÃ£ táº£i {len(notes)} ghi chÃº")
+    
+    def on_note_select(self, event):
+        """Handle note selection"""
+        selection = event.widget.curselection()
+        if not selection:
+            self.selected_note_id = None
+            self.disable_edit_buttons()
+            return
+        
+        index = selection[0]
+        notes = self.note_manager.notes_cache
+        
+        if index < len(notes):
+            note = notes[index]
+            self.selected_note_id = note['id']
+            self.display_note(note)
+            self.enable_edit_buttons()
+            self.update_status(f"ÄÃ£ chá»n ghi chÃº: {note['title'][:30]}...")
+        else:
+            self.selected_note_id = None
+            self.disable_edit_buttons()
+    
+    def display_note(self, note):
+        """Display selected note in editor"""
+        self.title_entry.delete(0, tk.END)
+        self.content_text.delete('1.0', tk.END)
+        
+        self.title_entry.insert(0, note['title'])
+        self.content_text.insert(tk.END, note['content'])
+        
+        self.selected_note_id = note['id']
+    
+    def clear_fields(self):
+        """Clear editor fields"""
+        self.title_entry.delete(0, tk.END)
+        self.content_text.delete('1.0', tk.END)
+        self.selected_note_id = None
+        self.disable_edit_buttons()
+        self.notes_listbox.selection_clear(0, tk.END)
+    
+    def enable_edit_buttons(self):
+        """Enable edit and delete buttons"""
+        self.btn_update.config(state=tk.NORMAL)
+        self.btn_delete.config(state=tk.NORMAL)
+    
+    def disable_edit_buttons(self):
+        """Disable edit and delete buttons"""
+        self.btn_update.config(state=tk.DISABLED)
+        self.btn_delete.config(state=tk.DISABLED)
+    
+    def save_note(self):
+        """Save a new note"""
+        try:
+            title = self.title_entry.get().strip()
+            content = self.content_text.get("1.0", tk.END).strip()
+            
+            note_id = self.note_manager.save_note(title, content)
+            self.refresh_notes_list()
+            self.clear_fields()
+            self.update_status(f"ÄÃ£ lÆ°u ghi chÃº má»›i (ID: {note_id})")
+            messagebox.showinfo("ThÃ nh cÃ´ng", "Ghi chÃº Ä‘Ã£ Ä‘Æ°á»£c lÆ°u!")
+            
+        except ValueError as e:
+            messagebox.showerror("Lá»—i", str(e))
+        except Exception as e:
+            messagebox.showerror("Lá»—i", f"KhÃ´ng thá»ƒ lÆ°u ghi chÃº: {str(e)}")
+    
+    def update_note(self):
+        """Update selected note"""
+        if not self.selected_note_id:
+            messagebox.showwarning("Cáº£nh bÃ¡o", "Vui lÃ²ng chá»n ghi chÃº trong danh sÃ¡ch trÆ°á»›c khi cáº­p nháº­t")
+            return
+        
+        try:
+            title = self.title_entry.get().strip()
+            content = self.content_text.get("1.0", tk.END).strip()
+            
+            if not title:
+                messagebox.showerror("Lá»—i", "TiÃªu Ä‘á» khÃ´ng Ä‘Æ°á»£c Ä‘á»ƒ trá»‘ng")
+                return
+            
+            if not content:
+                messagebox.showerror("Lá»—i", "Ná»™i dung khÃ´ng Ä‘Æ°á»£c Ä‘á»ƒ trá»‘ng")
+                return
+            
+            self.note_manager.update_note(self.selected_note_id, title, content)
+            self.refresh_notes_list()
+            
+            for i, note in enumerate(self.note_manager.notes_cache):
+                if note['id'] == self.selected_note_id:
+                    self.notes_listbox.selection_set(i)
+                    break
+            
+            self.update_status("ÄÃ£ cáº­p nháº­t ghi chÃº thÃ nh cÃ´ng")
+            messagebox.showinfo("ThÃ nh cÃ´ng", "Ghi chÃº Ä‘Ã£ Ä‘Æ°á»£c cáº­p nháº­t!")
+            
+        except ValueError as e:
+            messagebox.showerror("Lá»—i", str(e))
+        except Exception as e:
+            messagebox.showerror("Lá»—i", f"KhÃ´ng thá»ƒ cáº­p nháº­t ghi chÃº: {str(e)}")
+    
+    def delete_note(self):
+        """Delete selected note"""
+        if not self.selected_note_id:
+            messagebox.showwarning("Cáº£nh bÃ¡o", "Vui lÃ²ng chá»n ghi chÃº Ä‘á»ƒ xÃ³a")
+            return
+        
+        result = messagebox.askyesno(
+            "XÃ¡c nháº­n xÃ³a",
+            "Báº¡n cÃ³ cháº¯c cháº¯n muá»‘n xÃ³a ghi chÃº nÃ y?",
+            icon="warning"
+        )
+        
+        if result:
+            try:
+                self.note_manager.delete_note(self.selected_note_id)
+                self.refresh_notes_list()
+                self.clear_fields()
+                self.update_status("ÄÃ£ xÃ³a ghi chÃº")
+                messagebox.showinfo("ThÃ nh cÃ´ng", "Ghi chÃº Ä‘Ã£ Ä‘Æ°á»£c xÃ³a!")
+                
+            except Exception as e:
+                messagebox.showerror("Lá»—i", f"KhÃ´ng thá»ƒ xÃ³a ghi chÃº: {str(e)}")
+    
+    def export_json(self):
+        """Export notes to JSON file"""
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            title="LÆ°u file JSON"
+        )
+        
+        if file_path:
+            if self.note_manager.export_to_file(file_path):
+                messagebox.showinfo("ThÃ nh cÃ´ng", f"ÄÃ£ xuáº¥t {len(self.note_manager.notes_cache)} ghi chÃº ra file JSON!")
+                self.update_status(f"ÄÃ£ xuáº¥t ra: {file_path}")
+            else:
+                messagebox.showerror("Lá»—i", "KhÃ´ng thá»ƒ xuáº¥t file JSON")
+    
+    def show_about(self):
+        """Show about dialog"""
+        about_text = """Note Taking App - Enhanced Version
+        
+TÃ­nh nÄƒng:
+â€¢ LÆ°u trá»¯ kÃ©p: MySQL + JSON backup
+â€¢ Giao diá»‡n thÃ¢n thiá»‡n
+â€¢ Tá»± Ä‘á»™ng sync dá»¯ liá»‡u
+â€¢ Xuáº¥t file JSON
+â€¢ Xá»­ lÃ½ lá»—i toÃ n diá»‡n
+
+PhiÃªn báº£n: 2.0
+ÄÆ°á»£c cáº£i tiáº¿n vá»›i tÃ­nh nÄƒng lÆ°u trá»¯ an toÃ n."""
+        
+        messagebox.showinfo("Vá» chÆ°Æ¡ng trÃ¬nh", about_text)
+    
+    def update_status(self, message):
+        """Update status bar"""
+        self.status_bar.config(text=f"{datetime.now().strftime('%H:%M:%S')} - {message}")
+    
+    def run(self):
+        """Run the application"""
+        self.window.mainloop()
+
+# Main execution
+if __name__ == "__main__":
+    try:
+        app = NoteApp()
+        app.run()
+    except Exception as e:
+        logging.error(f"Application failed to start: {e}")
+        messagebox.showerror("Lá»—i nghiÃªm trá»ng", f"á»¨ng dá»¥ng khÃ´ng thá»ƒ khá»Ÿi Ä‘á»™ng: {str(e)}")
+
+
