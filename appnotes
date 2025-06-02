@@ -1,0 +1,653 @@
+from tkinter import *
+import tkinter as tk
+from tkinter import messagebox, filedialog
+import mysql.connector
+import json
+import os
+import logging
+from datetime import datetime
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+class NoteManager:
+    def __init__(self):
+        self.conn = None
+        self.json_file = "notes.json"
+        self.notes_cache = []
+        self.is_connected = False
+        
+    def connect_database(self):
+        """Connect to MySQL database"""
+        try:
+            self.conn = mysql.connector.connect(
+                host="localhost", 
+                port=3306, 
+                user="root", 
+                passwd="",
+                autocommit=True
+            )
+            self.is_connected = True
+            logging.info("Database connected successfully")
+            return True
+        except mysql.connector.Error as e:
+            logging.error(f"Database connection failed: {e}")
+            self.is_connected = False
+            return False
+    
+    def initialize_database(self):
+        """Create database and table if they don't exist"""
+        if not self.is_connected:
+            return False
+        
+        try:
+            cursor = self.conn.cursor()
+            
+            # Create database
+            cursor.execute("CREATE DATABASE IF NOT EXISTS db_notes")
+            cursor.execute("USE db_notes")
+            
+            # Create table
+            create_table_query = """
+                CREATE TABLE IF NOT EXISTS tb_notes (
+                    note_id INT AUTO_INCREMENT PRIMARY KEY,
+                    title VARCHAR(255) NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+            """
+            cursor.execute(create_table_query)
+            cursor.close()
+            logging.info("Database initialized successfully")
+            return True
+        except mysql.connector.Error as e:
+            logging.error(f"Database initialization failed: {e}")
+            return False
+    
+    def load_notes(self):
+        """Load notes from database or JSON file"""
+        if self.is_connected:
+            return self._load_from_database()
+        else:
+            return self._load_from_json()
+    
+    def _load_from_database(self):
+        """Load notes from MySQL database"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("USE db_notes")
+            cursor.execute("SELECT note_id, title, content FROM tb_notes ORDER BY updated_at DESC")
+            rows = cursor.fetchall()
+            cursor.close()
+            
+            notes = []
+            for row in rows:
+                notes.append({
+                    'id': row[0],
+                    'title': row[1],
+                    'content': row[2]
+                })
+            
+            self.notes_cache = notes
+            self._save_to_json(notes)  # Backup to JSON
+            logging.info(f"Loaded {len(notes)} notes from database")
+            return notes
+        except mysql.connector.Error as e:
+            logging.error(f"Failed to load from database: {e}")
+            return self._load_from_json()
+    
+    def _load_from_json(self):
+        """Load notes from JSON file"""
+        try:
+            if not os.path.exists(self.json_file):
+                return []
+            
+            with open(self.json_file, "r", encoding="utf-8") as f:
+                notes = json.load(f)
+            
+            # Validate JSON structure
+            validated_notes = []
+            for note in notes:
+                if isinstance(note, dict) and all(key in note for key in ['id', 'title', 'content']):
+                    validated_notes.append(note)
+            
+            self.notes_cache = validated_notes
+            logging.info(f"Loaded {len(validated_notes)} notes from JSON")
+            return validated_notes
+        except (json.JSONDecodeError, IOError) as e:
+            logging.error(f"Failed to load from JSON: {e}")
+            return []
+    
+    def _save_to_json(self, notes):
+        """Save notes to JSON file"""
+        try:
+            with open(self.json_file, "w", encoding="utf-8") as f:
+                json.dump(notes, f, indent=4, ensure_ascii=False)
+            logging.info("Notes saved to JSON successfully")
+        except IOError as e:
+            logging.error(f"Failed to save to JSON: {e}")
+    
+    def save_note(self, title, content):
+        """Save a new note"""
+        if not title.strip():
+            raise ValueError("Title không được để trống")
+        if not content.strip():
+            raise ValueError("Nội dung không được để trống")
+        
+        # Check for duplicate titles
+        for note in self.notes_cache:
+            if note['title'].lower() == title.lower():
+                raise ValueError("Tiêu đề đã tồn tại")
+        
+        if self.is_connected:
+            return self._save_to_database(title, content)
+        else:
+            return self._save_to_json_only(title, content)
+    
+    def _save_to_database(self, title, content):
+        """Save note to database"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("USE db_notes")
+            query = "INSERT INTO tb_notes (title, content) VALUES (%s, %s)"
+            cursor.execute(query, (title, content))
+            note_id = cursor.lastrowid
+            cursor.close()
+            
+            # Update cache
+            new_note = {'id': note_id, 'title': title, 'content': content}
+            self.notes_cache.insert(0, new_note)  # Insert at beginning (most recent)
+            self._save_to_json(self.notes_cache)
+            
+            logging.info(f"Note saved to database with ID: {note_id}")
+            return note_id
+        except mysql.connector.Error as e:
+            logging.error(f"Failed to save to database: {e}")
+            raise Exception("Lỗi lưu vào database")
+    
+    def _save_to_json_only(self, title, content):
+        """Save note to JSON only (when database is unavailable)"""
+        # Generate new ID
+        max_id = max([note['id'] for note in self.notes_cache] + [0])
+        new_id = max_id + 1
+        
+        new_note = {'id': new_id, 'title': title, 'content': content}
+        self.notes_cache.insert(0, new_note)
+        self._save_to_json(self.notes_cache)
+        
+        logging.info(f"Note saved to JSON with ID: {new_id}")
+        return new_id
+    
+    def update_note(self, note_id, title, content):
+        """Update an existing note"""
+        if not title.strip():
+            raise ValueError("Title không được để trống")
+        if not content.strip():
+            raise ValueError("Nội dung không được để trống")
+        
+        if self.is_connected:
+            self._update_in_database(note_id, title, content)
+        
+        # Update cache
+        for note in self.notes_cache:
+            if note['id'] == note_id:
+                note['title'] = title
+                note['content'] = content
+                break
+        
+        self._save_to_json(self.notes_cache)
+        logging.info(f"Note {note_id} updated successfully")
+    
+    def _update_in_database(self, note_id, title, content):
+        """Update note in database"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("USE db_notes")
+            query = "UPDATE tb_notes SET title = %s, content = %s WHERE note_id = %s"
+            cursor.execute(query, (title, content, note_id))
+            cursor.close()
+        except mysql.connector.Error as e:
+            logging.error(f"Failed to update in database: {e}")
+            raise Exception("Lỗi cập nhật database")
+    
+    def delete_note(self, note_id):
+        """Delete a note"""
+        if self.is_connected:
+            self._delete_from_database(note_id)
+        
+        # Update cache
+        self.notes_cache = [note for note in self.notes_cache if note['id'] != note_id]
+        self._save_to_json(self.notes_cache)
+        logging.info(f"Note {note_id} deleted successfully")
+    
+    def _delete_from_database(self, note_id):
+        """Delete note from database"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("USE db_notes")
+            query = "DELETE FROM tb_notes WHERE note_id = %s"
+            cursor.execute(query, (note_id,))
+            cursor.close()
+        except mysql.connector.Error as e:
+            logging.error(f"Failed to delete from database: {e}")
+            raise Exception("Lỗi xóa khỏi database")
+    
+    def get_note_by_id(self, note_id):
+        """Get a specific note by ID"""
+        for note in self.notes_cache:
+            if note['id'] == note_id:
+                return note
+        return None
+    
+    def export_to_file(self, file_path):
+        """Export notes to a JSON file"""
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(self.notes_cache, f, indent=4, ensure_ascii=False)
+            logging.info(f"Notes exported to: {file_path}")
+            return True
+        except IOError as e:
+            logging.error(f"Failed to export: {e}")
+            return False
+
+class NoteApp:
+    def __init__(self):
+        self.note_manager = NoteManager()
+        self.selected_note_id = None
+        self.setup_gui()
+        self.initialize_app()
+    
+    def setup_gui(self):
+        """Setup the GUI"""
+        self.window = tk.Tk()
+        self.window.title("Note Taking App - Enhanced Version")
+        self.window.geometry("900x700")
+        
+        # Menu bar
+        self.create_menu()
+        
+        # Main frames
+        self.create_frames()
+        
+        # Left panel - Notes list
+        self.create_notes_list()
+        
+        # Right panel - Note editor
+        self.create_note_editor()
+        
+        # Buttons
+        self.create_buttons()
+        
+        # Status bar
+        self.create_status_bar()
+    
+    def create_menu(self):
+        """Create menu bar"""
+        menubar = Menu(self.window)
+        
+        # File menu
+        file_menu = Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Xuất JSON", command=self.export_json)
+        file_menu.add_separator()
+        file_menu.add_command(label="Thoát", command=self.window.quit)
+        menubar.add_cascade(label="File", menu=file_menu)
+        
+        # Help menu
+        help_menu = Menu(menubar, tearoff=0)
+        help_menu.add_command(label="Về chương trình", command=self.show_about)
+        menubar.add_cascade(label="Trợ giúp", menu=help_menu)
+        
+        self.window.config(menu=menubar)
+    
+    def create_frames(self):
+        """Create main frames"""
+        # Main container
+        main_frame = tk.Frame(self.window)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        # Left frame for notes list
+        self.left_frame = tk.Frame(main_frame, width=300)
+        self.left_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        self.left_frame.pack_propagate(False)
+        
+        # Right frame for note editor
+        self.right_frame = tk.Frame(main_frame)
+        self.right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+    
+    def create_notes_list(self):
+        """Create notes list"""
+        # Title
+        list_title = tk.Label(self.left_frame, text="Danh sách ghi chú", font=("Arial", 12, "bold"))
+        list_title.pack(pady=(0, 10))
+        
+        # Listbox with scrollbar
+        list_frame = tk.Frame(self.left_frame)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+        
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.notes_listbox = tk.Listbox(
+            list_frame,
+            yscrollcommand=scrollbar.set,
+            font=("Arial", 10),
+            cursor="hand2",
+            background="#f8f9fa",
+            selectbackground="#007bff",
+            selectforeground="white"
+        )
+        self.notes_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.notes_listbox.bind('<<ListboxSelect>>', self.on_note_select)
+        
+        scrollbar.config(command=self.notes_listbox.yview)
+    
+    def create_note_editor(self):
+        """Create note editor"""
+        # Title entry
+        title_label = tk.Label(self.right_frame, text="Tiêu đề:", font=("Arial", 10, "bold"))
+        title_label.pack(anchor=tk.W, pady=(0, 5))
+        
+        self.title_entry = tk.Entry(
+            self.right_frame,
+            font=("Arial", 12),
+            bg="#ffffff",
+            relief=tk.SOLID,
+            bd=1
+        )
+        self.title_entry.pack(fill=tk.X, pady=(0, 10))
+        
+        # Content text area
+        content_label = tk.Label(self.right_frame, text="Nội dung:", font=("Arial", 10, "bold"))
+        content_label.pack(anchor=tk.W, pady=(0, 5))
+        
+        text_frame = tk.Frame(self.right_frame)
+        text_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        text_scrollbar = tk.Scrollbar(text_frame)
+        text_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.content_text = tk.Text(
+            text_frame,
+            yscrollcommand=text_scrollbar.set,
+            font=("Arial", 11),
+            bg="#ffffff",
+            relief=tk.SOLID,
+            bd=1,
+            wrap=tk.WORD
+        )
+        self.content_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        text_scrollbar.config(command=self.content_text.yview)
+    
+    def create_buttons(self):
+        """Create action buttons"""
+        button_frame = tk.Frame(self.right_frame)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        # Styling for buttons
+        btn_config = {
+            'font': ('Arial', 10, 'bold'),
+            'pady': 8,
+            'padx': 15,
+            'relief': tk.RAISED,
+            'bd': 2
+        }
+        
+        self.btn_save = tk.Button(
+            button_frame,
+            text="💾 Lưu mới",
+            command=self.save_note,
+            bg="#28a745",
+            fg="white",
+            **btn_config
+        )
+        self.btn_save.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.btn_update = tk.Button(
+            button_frame,
+            text="✏️ Cập nhật",
+            command=self.update_note,
+            bg="#ffc107",
+            fg="black",
+            state=tk.DISABLED,
+            **btn_config
+        )
+        self.btn_update.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.btn_delete = tk.Button(
+            button_frame,
+            text="🗑️ Xóa",
+            command=self.delete_note,
+            bg="#dc3545",
+            fg="white",
+            state=tk.DISABLED,
+            **btn_config
+        )
+        self.btn_delete.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.btn_clear = tk.Button(
+            button_frame,
+            text="🗒️ Làm mới",
+            command=self.clear_fields,
+            bg="#6c757d",
+            fg="white",
+            **btn_config
+        )
+        self.btn_clear.pack(side=tk.RIGHT)
+    
+    def create_status_bar(self):
+        """Create status bar"""
+        self.status_bar = tk.Label(
+            self.window,
+            text="Sẵn sàng",
+            relief=tk.SUNKEN,
+            anchor=tk.W,
+            font=("Arial", 9)
+        )
+        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+    
+    def initialize_app(self):
+        """Initialize the application"""
+        # Try to connect to database
+        if self.note_manager.connect_database():
+            self.note_manager.initialize_database()
+            self.update_status("Kết nối database thành công")
+        else:
+            self.update_status("Không thể kết nối database, sử dụng JSON")
+        
+        # Load notes
+        self.refresh_notes_list()
+    
+    def refresh_notes_list(self):
+        """Refresh the notes list"""
+        self.notes_listbox.delete(0, tk.END)
+        notes = self.note_manager.load_notes()
+        
+        for note in notes:
+            # Display first 50 characters of title
+            display_title = note['title'][:50]
+            if len(note['title']) > 50:
+                display_title += "..."
+            self.notes_listbox.insert(tk.END, display_title)
+        
+        self.update_status(f"Đã tải {len(notes)} ghi chú")
+    
+    def on_note_select(self, event):
+        """Handle note selection"""
+        selection = event.widget.curselection()
+        if not selection:
+            self.selected_note_id = None
+            self.disable_edit_buttons()
+            return
+        
+        index = selection[0]
+        notes = self.note_manager.notes_cache
+        
+        if index < len(notes):
+            note = notes[index]
+            self.selected_note_id = note['id']
+            self.display_note(note)
+            self.enable_edit_buttons()
+            self.update_status(f"Đã chọn ghi chú: {note['title'][:30]}...")
+        else:
+            self.selected_note_id = None
+            self.disable_edit_buttons()
+    
+    def display_note(self, note):
+        """Display selected note in editor"""
+        # Clear fields first
+        self.title_entry.delete(0, tk.END)
+        self.content_text.delete('1.0', tk.END)
+        
+        # Insert note data
+        self.title_entry.insert(0, note['title'])
+        self.content_text.insert(tk.END, note['content'])
+        
+        # Make sure we track the selected note
+        self.selected_note_id = note['id']
+    
+    def clear_fields(self):
+        """Clear editor fields"""
+        self.title_entry.delete(0, tk.END)
+        self.content_text.delete('1.0', tk.END)
+        self.selected_note_id = None
+        self.disable_edit_buttons()
+        self.notes_listbox.selection_clear(0, tk.END)  # Clear selection in listbox
+    
+    def enable_edit_buttons(self):
+        """Enable edit and delete buttons"""
+        self.btn_update.config(state=tk.NORMAL)
+        self.btn_delete.config(state=tk.NORMAL)
+    
+    def disable_edit_buttons(self):
+        """Disable edit and delete buttons"""
+        self.btn_update.config(state=tk.DISABLED)
+        self.btn_delete.config(state=tk.DISABLED)
+    
+    def save_note(self):
+        """Save a new note"""
+        try:
+            title = self.title_entry.get().strip()
+            content = self.content_text.get("1.0", tk.END).strip()
+            
+            note_id = self.note_manager.save_note(title, content)
+            self.refresh_notes_list()
+            self.clear_fields()
+            self.update_status(f"Đã lưu ghi chú mới (ID: {note_id})")
+            messagebox.showinfo("Thành công", "Ghi chú đã được lưu!")
+            
+        except ValueError as e:
+            messagebox.showerror("Lỗi", str(e))
+        except Exception as e:
+            messagebox.showerror("Lỗi", f"Không thể lưu ghi chú: {str(e)}")
+    
+    def update_note(self):
+        """Update selected note"""
+        # Debug: Check selected note ID
+        print(f"DEBUG: selected_note_id = {self.selected_note_id}")
+        print(f"DEBUG: notes_cache length = {len(self.note_manager.notes_cache)}")
+        
+        if not self.selected_note_id:
+            messagebox.showwarning("Cảnh báo", "Vui lòng chọn ghi chú trong danh sách trước khi cập nhật")
+            return
+        
+        try:
+            title = self.title_entry.get().strip()
+            content = self.content_text.get("1.0", tk.END).strip()
+            
+            if not title:
+                messagebox.showerror("Lỗi", "Tiêu đề không được để trống")
+                return
+            
+            if not content:
+                messagebox.showerror("Lỗi", "Nội dung không được để trống")
+                return
+            
+            self.note_manager.update_note(self.selected_note_id, title, content)
+            self.refresh_notes_list()
+            
+            # Keep the updated note selected
+            for i, note in enumerate(self.note_manager.notes_cache):
+                if note['id'] == self.selected_note_id:
+                    self.notes_listbox.selection_set(i)
+                    break
+            
+            self.update_status("Đã cập nhật ghi chú thành công")
+            messagebox.showinfo("Thành công", "Ghi chú đã được cập nhật!")
+            
+        except ValueError as e:
+            messagebox.showerror("Lỗi", str(e))
+        except Exception as e:
+            messagebox.showerror("Lỗi", f"Không thể cập nhật ghi chú: {str(e)}")
+    
+    def delete_note(self):
+        """Delete selected note"""
+        if not self.selected_note_id:
+            messagebox.showwarning("Cảnh báo", "Vui lòng chọn ghi chú để xóa")
+            return
+        
+        result = messagebox.askyesno(
+            "Xác nhận xóa",
+            "Bạn có chắc chắn muốn xóa ghi chú này?",
+            icon="warning"
+        )
+        
+        if result:
+            try:
+                self.note_manager.delete_note(self.selected_note_id)
+                self.refresh_notes_list()
+                self.clear_fields()
+                self.update_status("Đã xóa ghi chú")
+                messagebox.showinfo("Thành công", "Ghi chú đã được xóa!")
+                
+            except Exception as e:
+                messagebox.showerror("Lỗi", f"Không thể xóa ghi chú: {str(e)}")
+    
+    def export_json(self):
+        """Export notes to JSON file"""
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            title="Lưu file JSON"
+        )
+        
+        if file_path:
+            if self.note_manager.export_to_file(file_path):
+                messagebox.showinfo("Thành công", f"Đã xuất {len(self.note_manager.notes_cache)} ghi chú ra file JSON!")
+                self.update_status(f"Đã xuất ra: {file_path}")
+            else:
+                messagebox.showerror("Lỗi", "Không thể xuất file JSON")
+    
+    def show_about(self):
+        """Show about dialog"""
+        about_text = """Note Taking App - Enhanced Version
+        
+Tính năng:
+• Lưu trữ kép: MySQL + JSON backup
+• Giao diện thân thiện
+• Tự động sync dữ liệu
+• Xuất file JSON
+• Xử lý lỗi toàn diện
+
+Phiên bản: 2.0
+Được cải tiến với tính năng lưu trữ an toàn."""
+        
+        messagebox.showinfo("Về chương trình", about_text)
+    
+    def update_status(self, message):
+        """Update status bar"""
+        self.status_bar.config(text=f"{datetime.now().strftime('%H:%M:%S')} - {message}")
+    
+    def run(self):
+        """Run the application"""
+        self.window.mainloop()
+
+# Main execution
+if __name__ == "__main__":
+    try:
+        app = NoteApp()
+        app.run()
+    except Exception as e:
+        logging.error(f"Application failed to start: {e}")
+        messagebox.showerror("Lỗi nghiêm trọng", f"Ứng dụng không thể khởi động: {str(e)}")
