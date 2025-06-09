@@ -1,0 +1,270 @@
+from tkinter import *
+import tkinter as tk
+from tkinter import messagebox
+import json
+import os
+import hashlib
+
+# ===== JSON FILES =====
+json_file = "notes.json"
+users_file = "users.json"
+
+notes_ids = []
+selected_index = 0
+
+# ===== USER FUNCTIONS =====
+def load_users():
+    if not os.path.exists(users_file):
+        return []
+    with open(users_file, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_users(users):
+    with open(users_file, "w", encoding="utf-8") as f:
+        json.dump(users, f, indent=4, ensure_ascii=False)
+
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+# ===== NOTE FUNCTIONS =====
+def load_notes_from_json():
+    global notes_ids
+    if not os.path.exists(json_file):
+        return []
+    with open(json_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+        notes_ids = [note['id'] for note in data]
+        return data
+
+def save_notes_to_json(notes_data):
+    with open(json_file, "w", encoding="utf-8") as f:
+        json.dump(notes_data, f, indent=4, ensure_ascii=False)
+
+def get_note_by_id(note_id):
+    notes = load_notes_from_json()
+    for note in notes:
+        if note['id'] == note_id:
+            return note
+    return None
+
+# ===== LOGIN / REGISTER UI =====
+def register():
+    def save_register():
+        username = entry_user.get()
+        password = entry_pass.get()
+        if not username or not password:
+            messagebox.showerror("Lỗi", "Không được để trống")
+            return
+        users = load_users()
+        for user in users:
+            if user["username"] == username:
+                messagebox.showerror("Lỗi", "Tài khoản đã tồn tại")
+                return
+        users.append({"username": username, "password": hash_password(password)})
+        save_users(users)
+        messagebox.showinfo("Thành công", "Đăng ký thành công")
+        register_window.destroy()
+
+    register_window = tk.Toplevel()
+    register_window.title("Đăng Ký")
+    register_window.geometry("400x250")
+    register_window.resizable(False, False)
+
+    tk.Label(register_window, text="Tài khoản:", font=("Helvetica", 12)).pack(pady=(15, 5))
+    entry_user = tk.Entry(register_window, font=("Helvetica", 12), width=30)
+    entry_user.pack()
+
+    tk.Label(register_window, text="Mật khẩu:", font=("Helvetica", 12)).pack(pady=(15, 5))
+    entry_pass = tk.Entry(register_window, show="*", font=("Helvetica", 12), width=30)
+    entry_pass.pack()
+
+    tk.Button(register_window, text="Đăng ký", font=("Helvetica", 12), command=save_register).pack(pady=(15, 5))
+
+def login():
+    username = user_entry.get()
+    password = pass_entry.get()
+    users = load_users()
+    for user in users:
+        if user["username"] == username and user["password"] == hash_password(password):
+            show_note_app()
+            return
+    messagebox.showerror("Lỗi", "Sai tài khoản hoặc mật khẩu")
+
+# ===== NOTE APP UI =====
+window = tk.Tk()
+window.withdraw()  # Ẩn giao diện chính trước
+
+login_window = tk.Tk()
+login_window.title("Đăng Nhập")
+login_window.geometry("400x250")
+login_window.resizable(False, False)
+
+tk.Label(login_window, text="Tài khoản:", font=("Helvetica", 12)).pack(pady=(15, 5))
+user_entry = tk.Entry(login_window, font=("Helvetica", 12), width=30)
+user_entry.pack()
+
+tk.Label(login_window, text="Mật khẩu:", font=("Helvetica", 12)).pack(pady=(15, 5))
+pass_entry = tk.Entry(login_window, show="*", font=("Helvetica", 12), width=30)
+pass_entry.pack()
+
+tk.Button(login_window, text="Đăng Nhập", font=("Helvetica", 12), command=login).pack(pady=(15, 5))
+tk.Button(login_window, text="Đăng Ký", font=("Helvetica", 12), command=register).pack()
+
+# ===== BUILD MAIN APP UI =====
+def show_note_app():
+    login_window.destroy()
+    window.deiconify()
+
+    global photo_add, photo_edit, photo_delete
+
+    top_frame = tk.Frame(window)
+    scroll_list = tk.Scrollbar(top_frame)
+    scroll_list.pack(side=tk.RIGHT, fill=tk.Y)
+
+    list_notes.pack(side=tk.LEFT, fill=tk.Y, padx=(10, 0), pady=(10, 10))
+    scroll_list.config(command=list_notes.yview)
+    list_notes.config(yscrollcommand=scroll_list.set, cursor="hand2", background="#fff5e6",
+                      highlightbackground="grey", bd=0, selectbackground="#c9b922")
+    top_frame.pack(side=tk.TOP, padx=(0, 5))
+
+    text_frame = tk.Frame(window)
+    note_title.config(background="#F4F6F7", highlightbackground="grey")
+    note_title.pack(side=tk.TOP, pady=(0, 5), padx=(0, 10))
+
+    scroll_text.pack(side=tk.RIGHT, fill=tk.Y)
+    note_text.pack(side=tk.TOP, fill=tk.Y, padx=(5, 0), pady=(0, 5))
+    note_text.tag_config("tag_your_message", foreground="blue")
+    scroll_text.config(command=note_text.yview)
+    note_text.config(yscrollcommand=scroll_text.set, background="#F4F6F7", highlightbackground="grey")
+    text_frame.pack(side=tk.TOP)
+
+    photo_add = PhotoImage(file="add.gif")
+    photo_edit = PhotoImage(file="edit.gif")
+    photo_delete = PhotoImage(file="delete.gif")
+
+    btn_save.config(image=photo_add)
+    btn_edit.config(image=photo_edit)
+    btn_delete.config(image=photo_delete)
+
+    btn_save.grid(row=0, column=1)
+    btn_edit.grid(row=0, column=2)
+    btn_delete.grid(row=0, column=3)
+    btn_manual_save.grid(row=0, column=4, padx=(10, 0))
+    button_frame.pack(side=tk.TOP)
+    init()
+
+list_notes = Listbox(height=15, width=40)
+note_title = tk.Entry(width=39, font="Helvetica 13")
+note_text = tk.Text(height=7, width=40, font="Helvetica 13")
+scroll_text = tk.Scrollbar()
+
+button_frame = tk.Frame(window)
+btn_save = tk.Button(button_frame, text="Add", command=lambda: save_note())
+btn_edit = tk.Button(button_frame, text="Update", command=lambda: update_note(), state=tk.DISABLED)
+btn_delete = tk.Button(button_frame, text="Delete", command=lambda: delete_note(), state=tk.DISABLED)
+btn_manual_save = tk.Button(button_frame, text="Lưu Dữ Liệu", command=lambda: manual_save_to_json())
+
+# ===== FUNCTION: INIT =====
+def init():
+    notes = load_notes_from_json()
+    for note in notes:
+        list_notes.insert(tk.END, note['title'])
+
+# ===== FUNCTION: SELECT NOTE =====
+def onselect(evt):
+    global selected_index
+    if not list_notes.curselection():
+        return
+    index = int(list_notes.curselection()[0])
+    selected_index = index
+    display_note(index)
+
+list_notes.bind('<<ListboxSelect>>', lambda evt: onselect(evt))
+
+# ===== FUNCTION: DISPLAY NOTE =====
+def display_note(index):
+    note_title.delete(0, tk.END)
+    note_text.delete('1.0', tk.END)
+    note_id = notes_ids[index]
+    note = get_note_by_id(note_id)
+    if note:
+        note_title.insert(tk.END, note['title'])
+        note_text.insert(tk.END, note['note'])
+    btn_delete.config(state=tk.NORMAL)
+    btn_edit.config(state=tk.NORMAL)
+
+# ===== FUNCTION: SAVE NOTE =====
+def save_note():
+    title = note_title.get()
+    note = note_text.get("1.0", tk.END).strip()
+    if not title or not note:
+        tk.messagebox.showerror("ERROR", "Bạn phải nhập tiêu đề và nội dung")
+        return
+    notes = load_notes_from_json()
+    for n in notes:
+        if n['title'] == title:
+            tk.messagebox.showerror("ERROR", "Tiêu đề đã tồn tại.")
+            return
+    new_note = {
+        "id": max([n['id'] for n in notes], default=0) + 1,
+        "title": title,
+        "note": note
+    }
+    notes.append(new_note)
+    save_notes_to_json(notes)
+    list_notes.insert(tk.END, title)
+    notes_ids.append(new_note['id'])
+    note_title.delete(0, tk.END)
+    note_text.delete('1.0', tk.END)
+
+# ===== FUNCTION: UPDATE NOTE =====
+def update_note():
+    global selected_index
+    title = note_title.get()
+    note = note_text.get("1.0", tk.END).strip()
+    if not title or not note:
+        tk.messagebox.showerror("ERROR", "Bạn phải nhập tiêu đề và nội dung")
+        return
+    notes = load_notes_from_json()
+    note_id = notes_ids[selected_index]
+    for n in notes:
+        if n['id'] == note_id:
+            n['title'] = title
+            n['note'] = note
+            break
+    save_notes_to_json(notes)
+    list_notes.delete(selected_index)
+    list_notes.insert(selected_index, title)
+    note_title.delete(0, tk.END)
+    note_text.delete('1.0', tk.END)
+
+# ===== FUNCTION: DELETE NOTE =====
+def delete_note():
+    global selected_index, notes_ids
+    if selected_index is None or selected_index >= len(notes_ids):
+        tk.messagebox.showerror("ERROR", "Bạn chưa chọn ghi chú để xoá")
+        return
+    result = tk.messagebox.askyesno("Xoá", "Bạn có chắc chắn muốn xoá ghi chú này?")
+    if result:
+        note_id = notes_ids[selected_index]
+        notes = load_notes_from_json()
+        notes = [n for n in notes if n['id'] != note_id]
+        save_notes_to_json(notes)
+        del notes_ids[selected_index]
+        list_notes.delete(selected_index)
+        note_title.delete(0, tk.END)
+        note_text.delete('1.0', tk.END)
+
+# ===== SAVE TO FILE =====
+def manual_save_to_json():
+    notes = []
+    for idx in range(len(notes_ids)):
+        note = get_note_by_id(notes_ids[idx])
+        if note:
+            notes.append(note)
+    save_notes_to_json(notes)
+    tk.messagebox.showinfo("Đã lưu", "Dữ liệu đã được lưu vào file notes.json")
+
+# ===== RUN =====
+login_window.mainloop()
+window.mainloop()
